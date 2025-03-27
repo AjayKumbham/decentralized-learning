@@ -2,17 +2,69 @@ import numpy as np
 from typing import Dict, List, Tuple
 from sklearn.metrics import precision_recall_curve, roc_curve, auc, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, log_loss
 import logging
+from datetime import datetime
 
 class AdaptiveLearningManager:
     def __init__(self):
-        self.learning_rate = 0.01
-        self.min_learning_rate = 0.0001
-        self.max_learning_rate = 0.1
-        self.adaptation_rate = 0.1
-        self.metrics_history = []
-        self.window_size = 5
-        self.performance_threshold = 0.001
+        self.learning_rate = 0.1
+        self.best_auc = 0
+        self.patience = 5
+        self.patience_counter = 0
+        self.min_lr = 0.001
+        self.max_lr = 0.5
+        self.adaptation_history = []
         
+    def update_learning_rate(self, current_auc, validation_data=None):
+        """Update learning rate based on performance"""
+        try:
+            # Store current state
+            self.adaptation_history.append({
+                'learning_rate': self.learning_rate,
+                'auc': current_auc,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Update best AUC
+            if current_auc > self.best_auc:
+                self.best_auc = current_auc
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+            
+            # Adjust learning rate based on performance
+            if current_auc > self.best_auc:
+                # Increase learning rate if performance is improving
+                self.learning_rate = min(self.learning_rate * 1.1, self.max_lr)
+                logging.info(f"Performance improving. Increased learning rate to {self.learning_rate:.4f}")
+            else:
+                # Decrease learning rate if performance is not improving
+                self.learning_rate = max(self.learning_rate * 0.9, self.min_lr)
+                logging.info(f"Performance not improving. Decreased learning rate to {self.learning_rate:.4f}")
+            
+            # Early stopping check
+            if self.patience_counter >= self.patience:
+                logging.info(f"Early stopping triggered after {self.patience} rounds without improvement")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logging.error(f"Error updating learning rate: {str(e)}")
+            return False
+    
+    def get_adaptation_history(self):
+        """Get the history of learning rate adaptations"""
+        return self.adaptation_history
+    
+    def get_current_state(self):
+        """Get current adaptive learning state"""
+        return {
+            'learning_rate': self.learning_rate,
+            'best_auc': self.best_auc,
+            'patience_counter': self.patience_counter,
+            'adaptation_history': self.adaptation_history
+        }
+
     def get_model_metrics(self, y_true, y_pred_proba):
         """Calculate model performance metrics"""
         y_pred = (y_pred_proba > 0.5).astype(int)
@@ -27,52 +79,8 @@ class AdaptiveLearningManager:
             'log_loss': log_loss(y_true, y_pred_proba)
         }
         
-        # Store metrics history
-        self.metrics_history.append(metrics)
-        if len(self.metrics_history) > self.window_size:
-            self.metrics_history.pop(0)
-        
         return metrics
     
-    def update_learning_rate(self, metrics, validation_data):
-        """Adaptively update learning rate based on performance"""
-        if len(self.metrics_history) < 2:
-            return
-            
-        # Calculate performance change
-        current_auc = metrics['roc_auc']
-        previous_auc = self.metrics_history[-2]['roc_auc']
-        performance_change = current_auc - previous_auc
-        
-        # Adaptive learning rate update
-        if performance_change > self.performance_threshold:
-            # Performance improving, increase learning rate
-            self.learning_rate = min(
-                self.learning_rate * (1 + self.adaptation_rate),
-                self.max_learning_rate
-            )
-        elif performance_change < -self.performance_threshold:
-            # Performance degrading, decrease learning rate
-            self.learning_rate = max(
-                self.learning_rate * (1 - self.adaptation_rate),
-                self.min_learning_rate
-            )
-        
-        # Log adaptation
-        logging.info(
-            f"Learning rate adapted: {self.learning_rate:.4f} "
-            f"(change: {performance_change:.4f})"
-        )
-    
-    def get_adaptive_parameters(self):
-        """Get current adaptive parameters"""
-        return {
-            'learning_rate': self.learning_rate,
-            'adaptation_rate': self.adaptation_rate,
-            'performance_threshold': self.performance_threshold,
-            'metrics_history': self.metrics_history
-        }
-
     def get_optimal_threshold(self, 
                             y_true: np.ndarray,
                             y_pred_proba: np.ndarray) -> float:

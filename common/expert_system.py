@@ -1,71 +1,90 @@
+import logging
+
 class RuleBasedExpertSystem:
     def __init__(self):
-        self.rules = {
-            'high_amount': 10000,
-            'high_balance_change': 5000,
-            'suspicious_ratio': 0.8,
-            'multiple_transactions': 3,
-            'time_threshold': 3600  # 1 hour in seconds
-        }
+        self.rules = [
+            {
+                'name': 'High Amount Rule',
+                'condition': lambda x: x['amount'] > 10000,
+                'weight': 0.8,
+                'description': 'Transaction amount exceeds threshold'
+            },
+            {
+                'name': 'New Merchant Rule',
+                'condition': lambda x: x['merchant'] not in ['M1', 'M2', 'M3'],
+                'weight': 0.6,
+                'description': 'Transaction with new merchant'
+            },
+            {
+                'name': 'Time Rule',
+                'condition': lambda x: x['hour'] < 6 or x['hour'] > 22,
+                'weight': 0.7,
+                'description': 'Transaction during unusual hours'
+            }
+        ]
+        self.performance_history = []
     
-    def apply_rules(self, X, y=None):
-        """
-        Apply domain-specific rules to score transactions for fraud likelihood.
-        Returns a score between 0 and 1 for each transaction.
-        """
-        expert_scores = []
-        
-        for idx, row in X.iterrows():
-            score = 0.0
-            reasons = []
+    def adjust_rule_weights(self, model_performance):
+        """Dynamically adjust rule weights based on model performance"""
+        try:
+            self.performance_history.append(model_performance)
             
-            # Rule 1: High transaction amount
-            if row['amount'] > self.rules['high_amount']:
-                score += 0.3
-                reasons.append('high_amount')
+            # Calculate performance trend
+            if len(self.performance_history) >= 2:
+                trend = self.performance_history[-1]['auc'] - self.performance_history[-2]['auc']
+                
+                # Adjust weights based on trend
+                for rule in self.rules:
+                    if trend < 0:  # Performance decreasing
+                        rule['weight'] *= 1.1  # Increase rule influence
+                    else:  # Performance improving
+                        rule['weight'] *= 0.9  # Decrease rule influence
+                    
+                    # Keep weights in reasonable range
+                    rule['weight'] = max(0.1, min(1.0, rule['weight']))
+                    
+                logging.info("Adjusted expert rule weights based on performance trend")
+                
+        except Exception as e:
+            logging.error(f"Error adjusting rule weights: {str(e)}")
+    
+    def apply_rules(self, data):
+        """Apply expert rules to data"""
+        try:
+            results = []
+            for _, row in data.iterrows():
+                score = 0
+                reasons = []
+                total_weight = 0
+                
+                for rule in self.rules:
+                    if rule['condition'](row):
+                        score += rule['weight']
+                        reasons.append(rule['description'])
+                    total_weight += rule['weight']
+                
+                # Normalize score
+                if total_weight > 0:
+                    score = score / total_weight
+                
+                results.append({
+                    'score': score,
+                    'reasons': reasons
+                })
             
-            # Rule 2: Large balance changes
-            balance_change_orig = abs(row['oldbalanceOrg'] - row['newbalanceOrig'])
-            balance_change_dest = abs(row['oldbalanceDest'] - row['newbalanceDest'])
+            return results
             
-            if balance_change_orig > self.rules['high_balance_change'] or \
-               balance_change_dest > self.rules['high_balance_change']:
-                score += 0.2
-                reasons.append('high_balance_change')
-            
-            # Rule 3: Suspicious transaction ratio
-            if row['transaction_ratio'] > self.rules['suspicious_ratio']:
-                score += 0.2
-                reasons.append('suspicious_ratio')
-            
-            # Rule 4: Type-specific rules
-            if row['type'] in [1, 3]:  # CASH_OUT or TRANSFER
-                if row['amount'] > self.rules['high_amount'] * 0.5:
-                    score += 0.15
-                    reasons.append('suspicious_type')
-            
-            # Rule 5: Balance depletion
-            if row['newbalanceOrig'] < row['amount'] * 0.1:
-                score += 0.15
-                reasons.append('balance_depletion')
-            
-            # Cap the score at 1.0
-            score = min(score, 1.0)
-            expert_scores.append({
-                'score': score,
-                'reasons': reasons
-            })
-        
-        return expert_scores
+        except Exception as e:
+            logging.error(f"Error applying expert rules: {str(e)}")
+            return [{'score': 0, 'reasons': ['Error applying rules']}]
     
     def get_rule_explanations(self):
-        """
-        Returns explanations for all rules used in the system.
-        """
-        return {
-            'high_amount': f"Transactions above {self.rules['high_amount']} are considered high-risk",
-            'high_balance_change': f"Balance changes above {self.rules['high_balance_change']} are suspicious",
-            'suspicious_ratio': f"Transaction amount ratio above {self.rules['suspicious_ratio']} indicates potential fraud",
-            'suspicious_type': "Certain transaction types (CASH_OUT, TRANSFER) are inherently more risky",
-            'balance_depletion': "Transactions that nearly deplete the account balance are suspicious"
-        }
+        """Get explanations for all rules"""
+        return [
+            {
+                'name': rule['name'],
+                'description': rule['description'],
+                'weight': rule['weight']
+            }
+            for rule in self.rules
+        ]

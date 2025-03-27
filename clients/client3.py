@@ -81,51 +81,98 @@ class FederatedClient:
         
         try:
             # Calculate class weights
+            n_samples = len(y_train)
             n_positives = sum(y_train)
-            n_negatives = len(y_train) - n_positives
-            scale_pos_weight = n_negatives / n_positives if n_positives > 0 else 1
-            logging.info(f"Class distribution - Positives: {n_positives}, Negatives: {n_negatives}, Scale weight: {scale_pos_weight:.2f}")
+            n_negatives = n_samples - n_positives
+            scale_pos_weight = n_negatives / n_positives if n_positives > 0 else 1.0
             
-            # Create LightGBM datasets
-            train_data = lgb.Dataset(X_train, label=y_train)
-            valid_data = lgb.Dataset(X_test, label=y_test)
+            # Create LightGBM datasets with free_raw_data=False
+            train_data = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
+            valid_data = lgb.Dataset(X_test, label=y_test, reference=train_data, free_raw_data=False)
             
-            # Simplified parameters for faster training
+            # Initialize training parameters with adaptive learning rate
             params = {
                 'objective': 'binary',
+                'metric': 'auc',
                 'boosting_type': 'gbdt',
                 'num_leaves': 31,
-                'max_depth': 7,
-                'learning_rate': 0.1,
-                'scale_pos_weight': scale_pos_weight,
-                'metric': ['auc'],
-                'verbosity': -1,
-                'num_threads': 4
+                'max_depth': 6,
+                'learning_rate': self.adaptive_manager.learning_rate,
+                'feature_fraction': 0.9,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 5,
+                'verbose': -1,
+                'scale_pos_weight': scale_pos_weight
             }
-            logging.info(f"Training parameters: {params}")
             
-            # Train model with minimal iterations
-            logging.info("Starting model training...")
-            self.model = lgb.train(
-                params=params,
-                train_set=train_data,
-                valid_sets=[valid_data],
-                num_boost_round=50,  # Reduced iterations
-                callbacks=[
-                    lgb.early_stopping(stopping_rounds=5),
-                    lgb.log_evaluation(period=5)
-                ]
-            )
+            # Load existing model if available
+            model_path = f"models/{self.client_id}_model.txt"
+            if os.path.exists(model_path):
+                logging.info(f"Loading existing model from {model_path}")
+                self.model = lgb.Booster(model_file=model_path)
+                # Update learning rate for incremental training
+                self.model.learning_rate = self.adaptive_manager.learning_rate
             
-            # Quick evaluation
-            y_pred_proba = self.model.predict(X_test)
-            current_auc = roc_auc_score(y_test, y_pred_proba)
-            logging.info(f"Training completed. Final AUC: {current_auc:.4f}")
+            # Adaptive training loop
+            best_model = None
+            best_auc = 0
+            patience = 5
+            patience_counter = 0
+            
+            for epoch in range(100):  # Maximum 100 epochs
+                # Train for a small number of rounds per epoch
+                self.model = lgb.train(
+                    params,
+                    train_data,
+                    num_boost_round=10,
+                    valid_sets=[valid_data],
+                    callbacks=[lgb.early_stopping(stopping_rounds=5)],
+                    init_model=self.model
+                )
+                
+                # Evaluate current model
+                y_pred_proba = self.model.predict(X_test)
+                current_auc = roc_auc_score(y_test, y_pred_proba)
+                
+                # Update adaptive parameters with validation data
+                self.adaptive_manager.update_learning_rate(current_auc, valid_data)
+                params['learning_rate'] = self.adaptive_manager.learning_rate
+                
+                # Check for improvement
+                if current_auc > best_auc:
+                    best_auc = current_auc
+                    best_model = self.model
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
+                # Early stopping
+                if patience_counter >= patience:
+                    logging.info(f"Early stopping: validation scores not improving for {patience} rounds")
+                    break
+                
+                logging.info(f"Epoch {epoch + 1}, AUC: {current_auc:.4f}, Learning Rate: {params['learning_rate']:.4f}")
+            
+            # Use best model
+            if best_model is not None:
+                self.model = best_model
+                logging.info(f"Best model AUC: {best_auc:.4f}")
+                
+                # Save model with versioning
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                version_path = f"models/versions/{self.client_id}_model_v{timestamp}.txt"
+                os.makedirs("models/versions", exist_ok=True)
+                self.model.save_model(version_path)
+                logging.info(f"Saved model version to {version_path}")
+                
+                # Also save as latest model
+                self.model.save_model(model_path)
+                logging.info(f"Saved latest model to {model_path}")
             
             return True
             
         except Exception as e:
-            logging.error(f"Training error: {str(e)}", exc_info=True)
+            logging.error(f"Error in model training: {str(e)}", exc_info=True)
             return False
     
     def generate_explanations(self, X_test):
